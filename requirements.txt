@@ -1,0 +1,7 @@
+PyQt6>=6.6
+ytmusicapi>=1.8
+yt-dlp>=2024.10
+python-mpv>=1.0
+keyboard>=0.13
+Pillow>=10.0
+requests>=2.31

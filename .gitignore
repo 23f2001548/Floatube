@@ -1,0 +1,25 @@
+# Environments
+venv/
+env/
+.env
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Floatube specific
+*.dll
+*.log
+scratch/
+
+# IDEs
+.vscode/
+.idea/
+*.swp

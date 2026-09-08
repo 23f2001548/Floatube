@@ -74,4 +74,4 @@ If you want to build a standalone `.exe` file that you can share without needing
 - **python-mpv:** For robust audio playback.
 
 ## License
-MIT License
+GNU GPLv3 License

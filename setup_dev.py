@@ -16,10 +16,6 @@ VENV_DIR = os.path.join(PROJECT_DIR, "venv")
 ASSETS_DIR = os.path.join(PROJECT_DIR, "assets")
 REQUIREMENTS = os.path.join(PROJECT_DIR, "requirements.txt")
 
-# mpv dev build for Windows (x86_64)
-MPV_URL = "https://sourceforge.net/projects/mpv-player-windows/files/libmpv/mpv-dev-x86_64-20240121-git-a39f9b6.7z/download"
-MPV_DLL_NAME = "mpv-2.dll"  # Newer builds use mpv-2.dll
-
 
 def main():
     print("=" * 60)

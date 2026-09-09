@@ -6,7 +6,7 @@ All backend logic in one module.
 
 import random
 import time
-from collections import deque
+from collections import deque, OrderedDict
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -23,8 +23,8 @@ class CacheManager:
     """Simple TTL-based cache for search results and stream URLs."""
 
     def __init__(self, max_search=50, max_streams=100):
-        self._search_cache: dict[str, tuple[list[Track], datetime]] = {}
-        self._stream_cache: dict[str, tuple[str, datetime]] = {}
+        self._search_cache: OrderedDict[str, tuple[list[Track], datetime]] = OrderedDict()
+        self._stream_cache: OrderedDict[str, tuple[str, datetime]] = OrderedDict()
         self._max_search = max_search
         self._max_streams = max_streams
 
@@ -34,6 +34,7 @@ class CacheManager:
         if key in self._search_cache:
             results, expiry = self._search_cache[key]
             if datetime.now() < expiry:
+                self._search_cache.move_to_end(key)
                 return results
             del self._search_cache[key]
         return None
@@ -50,6 +51,7 @@ class CacheManager:
         if video_id in self._stream_cache:
             url, expiry = self._stream_cache[video_id]
             if datetime.now() < expiry:
+                self._stream_cache.move_to_end(video_id)
                 return url
             del self._stream_cache[video_id]
         return None
@@ -312,6 +314,7 @@ class AudioEngine(QObject):
         super().__init__(parent)
         self._player = None
         self._state = "stopped"
+        self._stopping = False
         self._position = 0.0
         self._duration = 0.0
         self._volume = 70
@@ -335,16 +338,18 @@ class AudioEngine(QObject):
 
             @self._player.event_callback("end-file")
             def _on_end(event):
-                data = event.get("event", {})
-                # Check if file ended naturally (not stopped by user)
-                reason = ""
-                if hasattr(event, "reason"):
-                    reason = str(event.reason)
-                elif isinstance(data, dict):
-                    reason = data.get("reason", "")
-                # mpv uses "eof" for natural end
-                if "eof" in str(event).lower() or self._state == "playing":
+                if self._stopping:
+                    return
+                # Only fire track_finished on natural EOF, not manual stop
+                reason = str(event).lower()
+                if "eof" in reason:
                     QTimer.singleShot(0, self.track_finished.emit)
+
+            @self._player.event_callback("file-loaded")
+            def _on_file_loaded(event):
+                if self._state == "loading":
+                    self._state = "playing"
+                    QTimer.singleShot(0, lambda: self.state_changed.emit("playing"))
 
         except Exception as e:
             self._player = None
@@ -357,12 +362,12 @@ class AudioEngine(QObject):
             if not self._player:
                 return
         try:
+            self._stopping = False
             self._state = "loading"
             self.state_changed.emit("loading")
             self._player.play(url)
             self._player.pause = False
-            self._state = "playing"
-            self.state_changed.emit("playing")
+            # State transitions to "playing" via file-loaded callback
             self._poll_timer.start()
         except Exception as e:
             self._state = "stopped"
@@ -400,6 +405,7 @@ class AudioEngine(QObject):
 
     def stop(self):
         """Stop playback completely."""
+        self._stopping = True
         if self._player:
             try:
                 self._player.stop()
@@ -409,6 +415,13 @@ class AudioEngine(QObject):
         self._poll_timer.stop()
         self.state_changed.emit("stopped")
         self.position_changed.emit(0.0)
+        # Reset _stopping after a brief delay to allow mpv events to drain
+        QTimer.singleShot(100, lambda: setattr(self, '_stopping', False))
+
+    def set_loading(self):
+        """Manually set state to loading (e.g., during stream resolution)."""
+        self._state = "loading"
+        self.state_changed.emit("loading")
 
     def seek(self, position: float):
         """Seek to a position in seconds."""
@@ -499,6 +512,7 @@ class QueueManager(QObject):
         self._shuffle = False
         self._repeat = RepeatMode.OFF
         self._original_queue: list[Track] = []  # Pre-shuffle order
+        self._user_stopped = False              # True when user manually stops
 
         # Wire signals
         self._engine.track_finished.connect(self._on_track_finished)
@@ -525,10 +539,13 @@ class QueueManager(QObject):
 
     def play_track(self, track: Track):
         """Play a track immediately and set it as current."""
+        self._user_stopped = False
         if self._current:
             self._history.append(self._current)
         self._current = track
         self.current_changed.emit(track)
+        self._engine.stop()
+        self._engine.set_loading()
         self._resolver.resolve(track.video_id)
 
     def load_track(self, track: Track):
@@ -539,7 +556,16 @@ class QueueManager(QObject):
     def play_current(self):
         """Play the currently loaded track (used for resuming state)."""
         if self._current:
+            self._engine.stop()
+            self._engine.set_loading()
             self._resolver.resolve(self._current.video_id)
+
+    def toggle_playback(self):
+        """Toggle play/pause, or play the loaded track if stopped."""
+        if self._engine.state == "stopped" and self._current:
+            self.play_current()
+        else:
+            self._engine.toggle()
 
     def play_track_and_queue(self, track: Track, related: list[Track] = None):
         """Play a track and replace queue with related tracks."""
@@ -565,6 +591,8 @@ class QueueManager(QObject):
     def next(self):
         """Skip to the next track."""
         if self._repeat == RepeatMode.ONE and self._current:
+            self._engine.stop()
+            self._engine.set_loading()
             self._resolver.resolve(self._current.video_id)
             return
 
@@ -574,6 +602,8 @@ class QueueManager(QObject):
             track = self._queue.popleft()
             self._current = track
             self.current_changed.emit(track)
+            self._engine.stop()
+            self._engine.set_loading()
             self._resolver.resolve(track.video_id)
             self.queue_changed.emit()
             # Pre-resolve the next one
@@ -597,6 +627,8 @@ class QueueManager(QObject):
                 self._queue.appendleft(self._current)
             self._current = self._history.pop()
             self.current_changed.emit(self._current)
+            self._engine.stop()
+            self._engine.set_loading()
             self._resolver.resolve(self._current.video_id)
             self.queue_changed.emit()
 
@@ -641,6 +673,21 @@ class QueueManager(QObject):
         self._repeat = (self._repeat + 1) % 3
         return self._repeat
 
+    def skip_to(self, index: int):
+        """Skip to a track at the given index in the queue."""
+        if 0 <= index < len(self._queue):
+            # Move skipped tracks to history
+            for _ in range(index):
+                skipped = self._queue.popleft()
+                self._history.append(skipped)
+            self.queue_changed.emit()
+            self.next()
+
+    def user_stop(self):
+        """Mark that the user intentionally stopped playback."""
+        self._user_stopped = True
+        self._engine.stop()
+
     # ── Private ────────────────────────────────────────────────────────────
     def _shuffle_queue(self):
         q_list = list(self._queue)
@@ -677,7 +724,8 @@ class QueueManager(QObject):
             self._shuffle_queue()
         self.queue_changed.emit()
         # If we had no queue and were waiting, start playing
-        if self._queue and self._engine.state == "stopped":
+        # But NOT if the user manually stopped playback
+        if self._queue and self._engine.state == "stopped" and not self._user_stopped:
             self.next()
         # Pre-resolve first in queue
         if self._queue:

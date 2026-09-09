@@ -12,7 +12,7 @@ from typing import Optional, Callable
 import os
 import sys
 
-from PyQt6.QtCore import QObject, QThread, pyqtSignal, QSettings, QPoint, QSize
+from PyQt6.QtCore import QObject, QThread, pyqtSignal, QSettings, QPoint, QSize, QMetaObject, Qt as QtCoreQt
 
 def get_asset_path(filename: str) -> str:
     """Get absolute path to an asset file."""
@@ -86,115 +86,59 @@ class Settings:
 #  POSITIONING — Taskbar detection + smart window placement
 # ═══════════════════════════════════════════════════════════════════════════════
 
-class _APPBARDATA(ctypes.Structure):
-    _fields_ = [
-        ("cbSize", ctypes.wintypes.DWORD),
-        ("hWnd", ctypes.wintypes.HWND),
-        ("uCallbackMessage", ctypes.wintypes.UINT),
-        ("uEdge", ctypes.wintypes.UINT),
-        ("rc", ctypes.wintypes.RECT),
-        ("lParam", ctypes.wintypes.LPARAM),
-    ]
-
-
 class Positioning:
-    """Detects taskbar position and calculates default widget placement."""
-
-    ABM_GETTASKBARPOS = 0x00000005
-    ABE_LEFT = 0
-    ABE_TOP = 1
-    ABE_RIGHT = 2
-    ABE_BOTTOM = 3
-
-    @staticmethod
-    def get_taskbar_rect() -> tuple[int, int, int, int]:
-        """Returns (left, top, right, bottom) of the Windows taskbar."""
-        try:
-            shell32 = ctypes.windll.shell32
-            abd = _APPBARDATA()
-            abd.cbSize = ctypes.sizeof(_APPBARDATA)
-            shell32.SHAppBarMessage(Positioning.ABM_GETTASKBARPOS, ctypes.byref(abd))
-            return (abd.rc.left, abd.rc.top, abd.rc.right, abd.rc.bottom)
-        except Exception:
-            # Fallback: assume bottom taskbar, 48px high
-            user32 = ctypes.windll.user32
-            sw = user32.GetSystemMetrics(0)  # SM_CXSCREEN
-            sh = user32.GetSystemMetrics(1)  # SM_CYSCREEN
-            return (0, sh - 48, sw, sh)
-
-    @staticmethod
-    def get_taskbar_edge() -> int:
-        """Returns which edge the taskbar is on (ABE_LEFT/TOP/RIGHT/BOTTOM)."""
-        try:
-            shell32 = ctypes.windll.shell32
-            abd = _APPBARDATA()
-            abd.cbSize = ctypes.sizeof(_APPBARDATA)
-            shell32.SHAppBarMessage(Positioning.ABM_GETTASKBARPOS, ctypes.byref(abd))
-            return abd.uEdge
-        except Exception:
-            return Positioning.ABE_BOTTOM
-
-    @staticmethod
-    def get_screen_size() -> tuple[int, int]:
-        """Returns (width, height) of the primary monitor."""
-        user32 = ctypes.windll.user32
-        return (user32.GetSystemMetrics(0), user32.GetSystemMetrics(1))
+    """Calculates widget placement using DPI-aware screen geometry."""
 
     @staticmethod
     def get_default_position(widget_width: int, widget_height: int, margin: int = 12) -> QPoint:
-        """Calculate the default widget position (bottom-right, above taskbar)."""
-        screen_w, screen_h = Positioning.get_screen_size()
-        tb_rect = Positioning.get_taskbar_rect()
-        edge = Positioning.get_taskbar_edge()
-
-        if edge == Positioning.ABE_BOTTOM:
-            x = screen_w - widget_width - margin
-            y = tb_rect[1] - widget_height - margin
-        elif edge == Positioning.ABE_TOP:
-            x = screen_w - widget_width - margin
-            y = tb_rect[3] + margin
-        elif edge == Positioning.ABE_RIGHT:
-            x = tb_rect[0] - widget_width - margin
-            y = screen_h - widget_height - margin
-        elif edge == Positioning.ABE_LEFT:
-            x = tb_rect[2] + margin
-            y = screen_h - widget_height - margin
-        else:
-            x = screen_w - widget_width - margin
-            y = screen_h - widget_height - margin - 48
-
-        return QPoint(max(0, x), max(0, y))
+        """Calculate the default widget position (bottom-right of available screen space)."""
+        from PyQt6.QtGui import QGuiApplication
+        screen = QGuiApplication.primaryScreen()
+        if screen:
+            rect = screen.availableGeometry()
+            x = rect.right() - widget_width - margin + 1
+            y = rect.bottom() - widget_height - margin + 1
+            return QPoint(max(rect.left(), x), max(rect.top(), y))
+        return QPoint(0, 0)
 
     @staticmethod
     def clamp_to_screen(pos: QPoint, widget_width: int, widget_height: int) -> QPoint:
-        """Ensure the widget stays within screen bounds."""
-        screen_w, screen_h = Positioning.get_screen_size()
-        x = max(0, min(pos.x(), screen_w - widget_width))
-        y = max(0, min(pos.y(), screen_h - widget_height))
-        return QPoint(x, y)
+        """Ensure the widget stays strictly within the DPI-aware screen bounds."""
+        from PyQt6.QtGui import QGuiApplication
+        screen = QGuiApplication.primaryScreen()
+        if screen:
+            rect = screen.availableGeometry()
+            x = max(rect.left(), min(pos.x(), rect.right() - widget_width + 1))
+            y = max(rect.top(), min(pos.y(), rect.bottom() - widget_height + 1))
+            return QPoint(x, y)
+        return pos
 
     @staticmethod
     def snap_to_edge(pos: QPoint, widget_width: int, widget_height: int,
                      threshold: int = 20) -> QPoint:
-        """Snap the widget to screen edges if within threshold."""
-        screen_w, screen_h = Positioning.get_screen_size()
+        """Snap the widget to screen edges if within threshold, and strictly clamp."""
+        from PyQt6.QtGui import QGuiApplication
+        screen = QGuiApplication.primaryScreen()
         x, y = pos.x(), pos.y()
 
-        # Left edge
-        if x < threshold:
-            x = 0
-        # Right edge
-        if x + widget_width > screen_w - threshold:
-            x = screen_w - widget_width
-        # Top edge
-        if y < threshold:
-            y = 0
-        # Bottom edge (above taskbar)
-        tb_rect = Positioning.get_taskbar_rect()
-        edge = Positioning.get_taskbar_edge()
-        if edge == Positioning.ABE_BOTTOM:
-            if y + widget_height > tb_rect[1] - threshold:
-                y = tb_rect[1] - widget_height
+        if screen:
+            rect = screen.availableGeometry()
+            
+            # Snap to left/right
+            if x < rect.left() + threshold:
+                x = rect.left()
+            elif x + widget_width > rect.right() - threshold + 1:
+                x = rect.right() - widget_width + 1
+                
+            # Snap to top/bottom
+            if y < rect.top() + threshold:
+                y = rect.top()
+            elif y + widget_height > rect.bottom() - threshold + 1:
+                y = rect.bottom() - widget_height + 1
+
+            # Strict clamping so it can NEVER be thrown off-screen
+            x = max(rect.left(), min(x, rect.right() - widget_width + 1))
+            y = max(rect.top(), min(y, rect.bottom() - widget_height + 1))
 
         return QPoint(x, y)
 
@@ -213,6 +157,7 @@ class MediaKeyListener(QObject):
         super().__init__(parent)
         self._running = False
         self._thread: Optional[threading.Thread] = None
+        self._hooks = []
 
     def start(self):
         """Start listening for global media keys in a daemon thread."""
@@ -227,7 +172,9 @@ class MediaKeyListener(QObject):
         self._running = False
         try:
             import keyboard
-            keyboard.unhook_all()
+            for hook in self._hooks:
+                keyboard.unhook(hook)
+            self._hooks.clear()
         except Exception:
             pass
 
@@ -236,9 +183,19 @@ class MediaKeyListener(QObject):
         try:
             import keyboard
 
-            keyboard.on_press_key("play/pause media", lambda _: self.play_pause.emit(), suppress=False)
-            keyboard.on_press_key("next track", lambda _: self.next_track.emit(), suppress=False)
-            keyboard.on_press_key("previous track", lambda _: self.prev_track.emit(), suppress=False)
+            # Use QMetaObject.invokeMethod for thread-safe signal emission
+            self._hooks.append(keyboard.on_press_key(
+                "play/pause media",
+                lambda _: QMetaObject.invokeMethod(self, "play_pause", QtCoreQt.ConnectionType.QueuedConnection),
+                suppress=False))
+            self._hooks.append(keyboard.on_press_key(
+                "next track",
+                lambda _: QMetaObject.invokeMethod(self, "next_track", QtCoreQt.ConnectionType.QueuedConnection),
+                suppress=False))
+            self._hooks.append(keyboard.on_press_key(
+                "previous track",
+                lambda _: QMetaObject.invokeMethod(self, "prev_track", QtCoreQt.ConnectionType.QueuedConnection),
+                suppress=False))
 
             # Keep thread alive
             while self._running:

@@ -6,15 +6,16 @@ QueuePanel, and TrayIcon. Dark glassmorphism aesthetic.
 
 import io
 import requests
+from collections import OrderedDict
 from typing import Optional
 
 from PyQt6.QtCore import (
     Qt, QTimer, QPoint, QPropertyAnimation, QEasingCurve, QSize,
-    pyqtSignal, pyqtSlot, QRect, QByteArray,
+    pyqtSignal, pyqtSlot, QRect, QByteArray, QThread,
 )
 from PyQt6.QtGui import (
     QPixmap, QPainter, QColor, QBrush, QPen, QIcon, QFont, QAction,
-    QCursor, QMouseEvent, QPaintEvent, QLinearGradient, QRadialGradient,
+    QCursor, QMouseEvent, QPaintEvent, QLinearGradient, QRadialGradient, QImage,
 )
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton, QLineEdit,
@@ -37,40 +38,54 @@ from platform_utils import Positioning, Settings, get_asset_path
 #  THUMBNAIL LOADER — Async thumbnail download
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_thumb_cache: dict[str, QPixmap] = {}
+_thumb_cache: OrderedDict[str, QPixmap] = OrderedDict()
+_thumb_workers: list = []  # Keep references to active thumbnail workers
 
 
-def _load_thumbnail(url: str, size: int = 60) -> QPixmap:
-    """Download and cache a thumbnail. Returns a placeholder if unavailable."""
-    print(f"[_load_thumbnail] Called for url: {url}")
-    if not url:
-        print("[_load_thumbnail] URL is empty, returning placeholder.")
-        return _placeholder_pixmap(size)
+class _ThumbnailWorker(QThread):
+    """Background thread that downloads a thumbnail image."""
+    finished = pyqtSignal(str, QImage)  # (url, image) — QImage is thread-safe
+
+    def __init__(self, url: str, size: int = 60):
+        super().__init__()
+        self._url = url
+        self._size = size
+
+    def run(self):
+        try:
+            resp = requests.get(self._url, timeout=5)
+            resp.raise_for_status()
+            image = QImage()
+            image.loadFromData(QByteArray(resp.content))
+            self.finished.emit(self._url, image)
+        except Exception:
+            self.finished.emit(self._url, QImage())  # Empty image signals failure
+
+
+def _get_cached_thumbnail(url: str, size: int = 60) -> Optional[QPixmap]:
+    """Return cached thumbnail if available, or None."""
     if url in _thumb_cache:
-        print("[_load_thumbnail] URL found in cache!")
+        _thumb_cache.move_to_end(url)
         return _thumb_cache[url]
-    try:
-        print(f"[_load_thumbnail] Downloading {url} ...")
-        resp = requests.get(url, timeout=5)
-        resp.raise_for_status()
-        pm = QPixmap()
-        pm.loadFromData(QByteArray(resp.content))
-        pm = pm.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
-                       Qt.TransformationMode.SmoothTransformation)
-        # Center-crop to square
-        if pm.width() > size or pm.height() > size:
-            x = (pm.width() - size) // 2
-            y = (pm.height() - size) // 2
-            pm = pm.copy(x, y, size, size)
-        _thumb_cache[url] = pm
-        if len(_thumb_cache) > 80:
-            oldest = next(iter(_thumb_cache))
-            del _thumb_cache[oldest]
-        print(f"[_load_thumbnail] Successfully loaded and cached.")
-        return pm
-    except Exception as e:
-        print(f"[_load_thumbnail] Error downloading thumbnail: {e}")
+    return None
+
+
+def _cache_thumbnail(url: str, image: QImage, size: int = 60) -> QPixmap:
+    """Process a downloaded QImage into a cached QPixmap. Must be called on the main thread."""
+    if image.isNull():
         return _placeholder_pixmap(size)
+    pm = QPixmap.fromImage(image)
+    pm = pm.scaled(size, size, Qt.AspectRatioMode.KeepAspectRatioByExpanding,
+                   Qt.TransformationMode.SmoothTransformation)
+    # Center-crop to square
+    if pm.width() > size or pm.height() > size:
+        x = (pm.width() - size) // 2
+        y = (pm.height() - size) // 2
+        pm = pm.copy(x, y, size, size)
+    _thumb_cache[url] = pm
+    if len(_thumb_cache) > 80:
+        _thumb_cache.popitem(last=False)  # Evict oldest (true LRU)
+    return pm
 
 
 def _placeholder_pixmap(size: int = 60) -> QPixmap:
@@ -132,21 +147,27 @@ class TitleBar(QWidget):
         layout.addStretch()
 
         # Search toggle button
-        self.btn_search = QPushButton("⌕")
+        self.btn_search = QPushButton("")
+        self.btn_search.setIcon(QIcon(get_asset_path("icons/search.svg")))
+        self.btn_search.setIconSize(QSize(20, 20))
         self.btn_search.setObjectName("btnMinimize")
         self.btn_search.setToolTip("Search")
         self.btn_search.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         layout.addWidget(self.btn_search)
 
         # Queue toggle button
-        self.btn_queue = QPushButton("☰")
+        self.btn_queue = QPushButton("")
+        self.btn_queue.setIcon(QIcon(get_asset_path("icons/queue.svg")))
+        self.btn_queue.setIconSize(QSize(20, 20))
         self.btn_queue.setObjectName("btnMinimize")
         self.btn_queue.setToolTip("Queue")
         self.btn_queue.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         layout.addWidget(self.btn_queue)
 
         # Minimize
-        btn_min = QPushButton("─")
+        btn_min = QPushButton("")
+        btn_min.setIcon(QIcon(get_asset_path("icons/minimize.svg")))
+        btn_min.setIconSize(QSize(20, 20))
         btn_min.setObjectName("btnMinimize")
         btn_min.setToolTip("Minimize to tray")
         btn_min.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -154,9 +175,11 @@ class TitleBar(QWidget):
         layout.addWidget(btn_min)
 
         # Close
-        btn_close = QPushButton("✕")
+        btn_close = QPushButton("")
+        btn_close.setIcon(QIcon(get_asset_path("icons/close.svg")))
+        btn_close.setIconSize(QSize(20, 20))
         btn_close.setObjectName("btnClose")
-        btn_close.setToolTip("Hide to tray")
+        btn_close.setToolTip("Quit Floatube")
         btn_close.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         btn_close.clicked.connect(self.close_clicked.emit)
         layout.addWidget(btn_close)
@@ -391,12 +414,32 @@ class NowPlaying(QWidget):
         self.time_total.setText(track.duration_display)
         self.progress_slider.setValue(0)
         self.time_current.setText("0:00")
-        # Load thumbnail async
-        QTimer.singleShot(0, lambda u=track.thumbnail_url: self._load_art(u))
+        # Load thumbnail (check cache first, then async download)
+        cached = _get_cached_thumbnail(track.thumbnail_url, ART_SIZE)
+        if cached:
+            self.art_label.setPixmap(_rounded_pixmap(cached, 10))
+        elif track.thumbnail_url:
+            self._load_art_async(track.thumbnail_url)
+        else:
+            self.art_label.setPixmap(_rounded_pixmap(_placeholder_pixmap(ART_SIZE), 10))
 
-    def _load_art(self, url: str):
-        pm = _load_thumbnail(url, ART_SIZE)
+    def _load_art_async(self, url: str):
+        """Download thumbnail in a background thread."""
+        worker = _ThumbnailWorker(url, ART_SIZE)
+        worker.finished.connect(self._on_thumb_loaded)
+        worker.finished.connect(lambda: self._cleanup_thumb_worker(worker))
+        _thumb_workers.append(worker)
+        worker.start()
+
+    def _on_thumb_loaded(self, url: str, image: QImage):
+        """Called on main thread when thumbnail download completes."""
+        pm = _cache_thumbnail(url, image, ART_SIZE)
         self.art_label.setPixmap(_rounded_pixmap(pm, 10))
+
+    def _cleanup_thumb_worker(self, worker):
+        if worker in _thumb_workers:
+            _thumb_workers.remove(worker)
+        worker.deleteLater()
 
     def update_position(self, position: float):
         """Update the progress slider and time label."""
@@ -452,7 +495,9 @@ class Controls(QWidget):
         layout.setSpacing(4)
 
         # Shuffle button
-        self.btn_shuffle = QPushButton("⇄")
+        self.btn_shuffle = QPushButton("")
+        self.btn_shuffle.setIcon(QIcon(get_asset_path("icons/shuffle.svg")))
+        self.btn_shuffle.setIconSize(QSize(20, 20))
         self.btn_shuffle.setProperty("class", "controlBtn")
         self.btn_shuffle.setToolTip("Shuffle")
         self.btn_shuffle.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -462,7 +507,9 @@ class Controls(QWidget):
         layout.addStretch()
 
         # Previous
-        btn_prev = QPushButton("⏮")
+        btn_prev = QPushButton("")
+        btn_prev.setIcon(QIcon(get_asset_path("icons/prev.svg")))
+        btn_prev.setIconSize(QSize(20, 20))
         btn_prev.setProperty("class", "controlBtn")
         btn_prev.setToolTip("Previous")
         btn_prev.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -470,7 +517,9 @@ class Controls(QWidget):
         layout.addWidget(btn_prev)
 
         # Play/Pause (larger, accented)
-        self.btn_play = QPushButton("▶")
+        self.btn_play = QPushButton("")
+        self.btn_play.setIcon(QIcon(get_asset_path("icons/play.svg")))
+        self.btn_play.setIconSize(QSize(28, 28))
         self.btn_play.setObjectName("btnPlayPause")
         self.btn_play.setToolTip("Play")
         self.btn_play.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -478,7 +527,9 @@ class Controls(QWidget):
         layout.addWidget(self.btn_play)
 
         # Next
-        btn_next = QPushButton("⏭")
+        btn_next = QPushButton("")
+        btn_next.setIcon(QIcon(get_asset_path("icons/next.svg")))
+        btn_next.setIconSize(QSize(20, 20))
         btn_next.setProperty("class", "controlBtn")
         btn_next.setToolTip("Next")
         btn_next.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -488,7 +539,9 @@ class Controls(QWidget):
         layout.addStretch()
 
         # Repeat button
-        self.btn_repeat = QPushButton("↻")
+        self.btn_repeat = QPushButton("")
+        self.btn_repeat.setIcon(QIcon(get_asset_path("icons/repeat.svg")))
+        self.btn_repeat.setIconSize(QSize(20, 20))
         self.btn_repeat.setProperty("class", "controlBtn")
         self.btn_repeat.setToolTip("Repeat: Off")
         self.btn_repeat.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -496,7 +549,9 @@ class Controls(QWidget):
         layout.addWidget(self.btn_repeat)
 
         # Volume icon
-        self.btn_mute = QPushButton("🔊")
+        self.btn_mute = QPushButton("")
+        self.btn_mute.setIcon(QIcon(get_asset_path("icons/vol_high.svg")))
+        self.btn_mute.setIconSize(QSize(20, 20))
         self.btn_mute.setProperty("class", "controlBtn")
         self.btn_mute.setToolTip("Mute")
         self.btn_mute.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
@@ -516,31 +571,28 @@ class Controls(QWidget):
 
     def set_playing(self, playing: bool):
         self._is_playing = playing
-        self.btn_play.setText("⏸" if playing else "▶")
+        icon_name = "pause.svg" if playing else "play.svg"
+        self.btn_play.setIcon(QIcon(get_asset_path(f"icons/{icon_name}")))
         self.btn_play.setToolTip("Pause" if playing else "Play")
 
     def set_shuffle_active(self, active: bool):
-        self.btn_shuffle.setStyleSheet(
-            f"color: {ACCENT_PRIMARY};" if active else ""
-        )
+        icon_name = "shuffle_active.svg" if active else "shuffle.svg"
+        self.btn_shuffle.setIcon(QIcon(get_asset_path(f"icons/{icon_name}")))
 
     def set_repeat_mode(self, mode: int):
-        labels = {RepeatMode.OFF: "↻", RepeatMode.ALL: "↻ All", RepeatMode.ONE: "↻ 1"}
+        icons = {RepeatMode.OFF: "repeat.svg", RepeatMode.ALL: "repeat_active.svg", RepeatMode.ONE: "repeat_one_active.svg"}
         tips = {RepeatMode.OFF: "Repeat: Off", RepeatMode.ALL: "Repeat: All", RepeatMode.ONE: "Repeat: One"}
-        self.btn_repeat.setText(labels.get(mode, "↻"))
+        self.btn_repeat.setIcon(QIcon(get_asset_path(f"icons/{icons.get(mode, 'repeat.svg')}")))
         self.btn_repeat.setToolTip(tips.get(mode, "Repeat"))
-        self.btn_repeat.setStyleSheet(
-            f"color: {ACCENT_PRIMARY};" if mode != RepeatMode.OFF else ""
-        )
 
     def _on_volume(self, value: int):
         self.volume_changed.emit(value)
         if value == 0:
-            self.btn_mute.setText("🔇")
+            self.btn_mute.setIcon(QIcon(get_asset_path("icons/vol_mute.svg")))
         elif value < 50:
-            self.btn_mute.setText("🔉")
+            self.btn_mute.setIcon(QIcon(get_asset_path("icons/vol_low.svg")))
         else:
-            self.btn_mute.setText("🔊")
+            self.btn_mute.setIcon(QIcon(get_asset_path("icons/vol_high.svg")))
 
     def _toggle_mute(self):
         if self.volume_slider.value() > 0:
@@ -727,7 +779,7 @@ class MainWindow(QWidget):
         # Title bar
         self.title_bar = TitleBar(self)
         self.title_bar.close_clicked.connect(self.close_requested.emit)
-        self.title_bar.minimize_clicked.connect(self.showMinimized)
+        self.title_bar.minimize_clicked.connect(self.hide)
         self.title_bar.btn_search.clicked.connect(lambda: self._toggle_panel("search"))
         self.title_bar.btn_queue.clicked.connect(lambda: self._toggle_panel("queue"))
         self._layout.addWidget(self.title_bar)
@@ -834,12 +886,8 @@ class MainWindow(QWidget):
         self.move(new_pos)
 
     # ── Signal Handlers ────────────────────────────────────────────────────
-    
     def _on_play_pause_clicked(self):
-        if self._engine._state == "stopped" and self._queue_mgr.current_track:
-            self._queue_mgr.play_current()
-        else:
-            self._engine.toggle()
+        self._queue_mgr.toggle_playback()
 
     def _on_track_selected(self, track: Track):
         self._queue_mgr.play_track_and_queue(track)
@@ -848,7 +896,7 @@ class MainWindow(QWidget):
             self._toggle_panel("search")
 
     def _on_state_changed(self, state: str):
-        self.controls.set_playing(state == "playing")
+        self.controls.set_playing(state in ("playing", "loading"))
 
     def _on_current_changed(self, track):
         if track:
@@ -870,16 +918,12 @@ class MainWindow(QWidget):
 
     def _on_queue_track_clicked(self, index: int):
         """Double-click a track in the queue to skip to it."""
-        queue = self._queue_mgr.queue
-        if 0 <= index < len(queue):
-            track = queue[index]
-            # Remove tracks before this one and play it
-            for _ in range(index):
-                self._queue_mgr._queue.popleft()
-            self._queue_mgr.next()
+        self._queue_mgr.skip_to(index)
 
     def _save_state(self):
         self._settings.set_window_pos(self.pos())
         self._settings.set_volume(self._engine.volume)
         self._settings.set_shuffle(self._queue_mgr.shuffle)
         self._settings.set_repeat(self._queue_mgr.repeat)
+        if self._queue_mgr.current_track:
+            self._settings.set_last_track(self._queue_mgr.current_track.to_dict())

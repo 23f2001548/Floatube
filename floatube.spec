@@ -6,7 +6,6 @@ import sys
 from PyInstaller.utils.hooks import collect_data_files
 ytm_datas = collect_data_files('ytmusicapi')
 
-block_cipher = None
 
 a = Analysis(
     ['main.py'],
@@ -20,10 +19,9 @@ a = Analysis(
     excludes=[],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
-    cipher=block_cipher,
     noarchive=False,
 )
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure, a.zipped_data)
 
 exe = EXE(
     pyz,

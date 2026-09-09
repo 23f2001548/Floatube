@@ -27,7 +27,7 @@ SUCCESS = "#22c55e"
 
 # ── Dimensions ─────────────────────────────────────────────────────────────────
 WIDGET_WIDTH = 380
-MINI_HEIGHT = 160
+MINI_HEIGHT = 185
 EXPANDED_HEIGHT = 500
 CORNER_RADIUS = 16
 TITLE_BAR_HEIGHT = 32

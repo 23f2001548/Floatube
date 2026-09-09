@@ -19,6 +19,7 @@ os.environ["PATH"] = _script_dir + os.pathsep + os.environ["PATH"]
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QFont, QIcon
+from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 
 from models import Track
 from styles import STYLESHEET
@@ -49,6 +50,23 @@ def main():
     font = QFont("Segoe UI", 10)
     app.setFont(font)
 
+    # ── Single Instance Check ──────────────────────────────────────────────
+    SERVER_NAME = "Floatube_IPC_Server"
+    
+    # Try connecting to an existing instance
+    socket = QLocalSocket()
+    socket.connectToServer(SERVER_NAME)
+    if socket.waitForConnected(500):
+        # Already running! Send wake message
+        socket.write(b"wake")
+        socket.waitForBytesWritten(500)
+        sys.exit(0)
+        
+    # Not running, so we are the primary instance.
+    QLocalServer.removeServer(SERVER_NAME)
+    server = QLocalServer()
+    server.listen(SERVER_NAME)
+
     # ── Instantiate services ───────────────────────────────────────────────
     settings = Settings()
     audio_engine = AudioEngine()
@@ -68,7 +86,7 @@ def main():
     tray = TrayIcon()
     tray.show_toggle.connect(lambda: window.setVisible(not window.isVisible()))
     tray.quit_app.connect(lambda: _shutdown(app, audio_engine, media_keys, settings, window))
-    tray.play_pause.connect(audio_engine.toggle)
+    tray.play_pause.connect(queue_manager.toggle_playback)
     tray.next_track.connect(queue_manager.next)
     tray.prev_track.connect(queue_manager.previous)
 
@@ -81,7 +99,7 @@ def main():
 
     # ── Media keys ─────────────────────────────────────────────────────────
     media_keys = MediaKeyListener()
-    media_keys.play_pause.connect(audio_engine.toggle)
+    media_keys.play_pause.connect(queue_manager.toggle_playback)
     media_keys.next_track.connect(queue_manager.next)
     media_keys.prev_track.connect(queue_manager.previous)
     media_keys.start()
@@ -96,8 +114,20 @@ def main():
             pass
 
     # ── Show window ────────────────────────────────────────────────────────
-    window.close_requested.connect(tray.quit_app.emit)
+    window.close_requested.connect(lambda: _shutdown(app, audio_engine, media_keys, settings, window))
     window.show()
+
+    def on_new_connection():
+        conn = server.nextPendingConnection()
+        if conn.waitForReadyRead(500):
+            msg = conn.readAll().data()
+            if msg == b"wake":
+                window.showNormal()
+                window.raise_()
+                window.activateWindow()
+        conn.disconnectFromServer()
+        
+    server.newConnection.connect(on_new_connection)
 
     # ── Run ────────────────────────────────────────────────────────────────
     sys.exit(app.exec())
@@ -108,6 +138,10 @@ def _shutdown(app, audio_engine, media_keys, settings, window):
     # Save state
     settings.set_window_pos(window.pos())
     settings.set_volume(audio_engine.volume)
+    settings.set_shuffle(window._queue_mgr.shuffle)
+    settings.set_repeat(window._queue_mgr.repeat)
+    if window._queue_mgr.current_track:
+        settings.set_last_track(window._queue_mgr.current_track.to_dict())
 
     # Stop services
     media_keys.stop()

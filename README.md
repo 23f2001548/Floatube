@@ -11,6 +11,7 @@ Floatube is a beautiful, frameless, and translucent floating desktop widget for 
 - **Glassmorphism UI:** Translucent background with a modern, dark aesthetic.
 - **YouTube Music Integration:** Search, queue, and play directly from YouTube Music without a browser.
 - **Auto-Play/Radio:** When the queue finishes, Floatube automatically fetches related tracks to keep the music going.
+- **Offline Listening:** Download your favorite tracks for offline playback. Floatube automatically detects when you're offline and acts as a local music player with a seamless offline playlist.
 - **System Tray Integration:** Minimizes to the system tray for easy background listening. Right-click the tray icon to play/pause, skip, or exit.
 - **Media Keys Support:** Control playback with your keyboard's global media keys (Play/Pause, Next, Previous).
 - **Persistent State:** Remembers your volume, window position, and the last track you were listening to.
@@ -55,8 +56,9 @@ After completing the setup, you can launch Floatube by activating the virtual en
 1. **Search:** Click the Search icon (🔍) on the title bar and type the name of a song or artist.
 2. **Play:** Click on any track from the search results to instantly start playing. Floatube will automatically fetch related tracks to play next.
 3. **Queue:** Click the Queue icon (🎵) to see what's playing next, view your listening history, and toggle Repeat or Shuffle.
-4. **Move:** Click and drag anywhere on the top title bar to move the widget around your screen.
-5. **Minimize & Close:** The minimize button hides the app to your system tray. The close button completely shuts down Floatube.
+4. **Downloads:** Click the Download icon (⬇) in the Now Playing controls or right-click any track in the Search/Queue panel to download it. Access your downloaded tracks anytime via the Downloads panel.
+5. **Move:** Click and drag anywhere on the top title bar to move the widget around your screen.
+6. **Minimize & Close:** The minimize button hides the app to your system tray. The close button completely shuts down Floatube.
 
 ## Building the Executable
 

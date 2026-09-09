@@ -9,6 +9,8 @@ import requests
 from collections import OrderedDict
 from typing import Optional
 
+from library import LocalLibrary, DownloadManager
+
 from PyQt6.QtCore import (
     Qt, QTimer, QPoint, QPropertyAnimation, QEasingCurve, QSize,
     pyqtSignal, pyqtSlot, QRect, QByteArray, QThread,
@@ -164,6 +166,15 @@ class TitleBar(QWidget):
         self.btn_queue.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
         layout.addWidget(self.btn_queue)
 
+        # Downloads toggle button
+        self.btn_downloads = QPushButton("")
+        self.btn_downloads.setIcon(QIcon(get_asset_path("icons/library.svg")))
+        self.btn_downloads.setIconSize(QSize(20, 20))
+        self.btn_downloads.setObjectName("btnMinimize")
+        self.btn_downloads.setToolTip("Downloads")
+        self.btn_downloads.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        layout.addWidget(self.btn_downloads)
+
         # Minimize
         btn_min = QPushButton("")
         btn_min.setIcon(QIcon(get_asset_path("icons/minimize.svg")))
@@ -214,6 +225,7 @@ class SearchPanel(QWidget):
     track_selected = pyqtSignal(object)        # Track
     track_play_next = pyqtSignal(object)       # Track
     track_enqueue = pyqtSignal(object)         # Track
+    track_download_requested = pyqtSignal(object) # Track
 
     def __init__(self, search_service: SearchService, parent=None):
         super().__init__(parent)
@@ -314,10 +326,14 @@ class SearchPanel(QWidget):
         menu = QMenu(self)
         play_next_action = menu.addAction("▶  Play Next")
         enqueue_action = menu.addAction("＋  Add to Queue")
+        download_action = menu.addAction("⬇  Download Track")
         action = menu.exec(self.results_list.mapToGlobal(pos))
         if action == play_next_action:
             self.track_play_next.emit(track)
         elif action == enqueue_action:
+            self.track_enqueue.emit(track)
+        elif action == download_action:
+            self.track_download_requested.emit(track)
             self.track_enqueue.emit(track)
 
 
@@ -328,6 +344,7 @@ class SearchPanel(QWidget):
 class NowPlaying(QWidget):
     """Displays current track info and a seekable progress bar."""
     seek_requested = pyqtSignal(float)
+    download_requested = pyqtSignal(object) # Track
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -357,11 +374,29 @@ class NowPlaying(QWidget):
         info_layout.setSpacing(2)
         info_layout.addStretch()
 
+        title_row = QHBoxLayout()
+        title_row.setSpacing(4)
+        title_row.setContentsMargins(0, 0, 0, 0)
+        
         self.title_label = QLabel("No track playing")
         self.title_label.setObjectName("trackTitle")
         self.title_label.setWordWrap(False)
-        self.title_label.setMaximumWidth(WIDGET_WIDTH - ART_SIZE - 50)
-        info_layout.addWidget(self.title_label)
+        self.title_label.setMaximumWidth(WIDGET_WIDTH - ART_SIZE - 70)
+        title_row.addWidget(self.title_label)
+        
+        title_row.addStretch()
+
+        self.btn_download = QPushButton("")
+        self.btn_download.setIcon(QIcon(get_asset_path("icons/download.svg")))
+        self.btn_download.setIconSize(QSize(16, 16))
+        self.btn_download.setObjectName("btnMinimize")
+        self.btn_download.setToolTip("Download Current Track")
+        self.btn_download.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
+        self.btn_download.clicked.connect(self._on_download_clicked)
+        self.btn_download.hide() # hide if no track
+        title_row.addWidget(self.btn_download)
+
+        info_layout.addLayout(title_row)
 
         self.artist_label = QLabel("Search for music to start")
         self.artist_label.setObjectName("trackArtist")
@@ -404,6 +439,12 @@ class NowPlaying(QWidget):
     def set_track(self, track: Track):
         """Update display for a new track."""
         self._current_track = track
+        
+        if track.is_local:
+            self.btn_download.hide()
+        else:
+            self.btn_download.show()
+            
         self.title_label.setText(track.title)
         # Elide the title if too long
         metrics = self.title_label.fontMetrics()
@@ -464,6 +505,10 @@ class NowPlaying(QWidget):
             self.time_total.setText(f"{hours}:{mins:02d}:{secs:02d}")
         else:
             self.time_total.setText(f"{mins}:{secs:02d}")
+
+    def _on_download_clicked(self):
+        if self._current_track and not self._current_track.is_local:
+            self.download_requested.emit(self._current_track)
 
     def _on_seek(self):
         self._seeking = False
@@ -610,6 +655,7 @@ class QueuePanel(QWidget):
     """Collapsible panel showing the upcoming queue."""
     track_clicked = pyqtSignal(int)            # index to play
     track_removed = pyqtSignal(int)            # index to remove
+    track_download_requested = pyqtSignal(object) # Track
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -738,6 +784,79 @@ class TrayIcon(QSystemTrayIcon):
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+#  DOWNLOADS PANEL — Offline tracks list
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class DownloadsPanel(QWidget):
+    """Collapsible panel showing locally downloaded tracks."""
+    track_clicked = pyqtSignal(object)         # Track
+    track_play_next = pyqtSignal(object)       # Track
+    track_enqueue = pyqtSignal(object)         # Track
+    track_remove = pyqtSignal(str)             # video_id
+
+    def __init__(self, local_library: 'LocalLibrary', parent=None):
+        super().__init__(parent)
+        self.setVisible(False)
+        self._library = local_library
+        self._tracks: list[Track] = []
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(4, 0, 4, 8)
+        layout.setSpacing(2)
+
+        header = QLabel("MY DOWNLOADS")
+        header.setObjectName("queueHeader")
+        layout.addWidget(header)
+
+        self.list_widget = QListWidget()
+        self.list_widget.setObjectName("queueList")
+        self.list_widget.setMinimumHeight(80)
+        self.list_widget.setMaximumHeight(200)
+        self.list_widget.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.list_widget.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.list_widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.list_widget.customContextMenuRequested.connect(self._on_context_menu)
+        self.list_widget.itemDoubleClicked.connect(self._on_double_click)
+        layout.addWidget(self.list_widget)
+
+        self._library.library_updated.connect(self.refresh)
+        self.refresh()
+
+    def refresh(self):
+        self._tracks = self._library.tracks
+        self.list_widget.clear()
+        for track in self._tracks:
+            item = QListWidgetItem()
+            item.setSizeHint(QSize(0, 48))
+            text = f"{track.title}\n{track.artist}  ·  {track.duration_display}"
+            item.setText(text)
+            item.setToolTip(f"{track.title} — {track.artist}")
+            self.list_widget.addItem(item)
+
+    def _on_double_click(self, item: QListWidgetItem):
+        idx = self.list_widget.row(item)
+        if 0 <= idx < len(self._tracks):
+            self.track_clicked.emit(self._tracks[idx])
+
+    def _on_context_menu(self, pos):
+        idx = self.list_widget.currentRow()
+        if idx < 0 or idx >= len(self._tracks):
+            return
+        track = self._tracks[idx]
+        menu = QMenu(self)
+        play_next_action = menu.addAction("▶  Play Next")
+        enqueue_action = menu.addAction("＋  Add to Queue")
+        remove_action = menu.addAction("🗑  Remove Download")
+        action = menu.exec(self.list_widget.mapToGlobal(pos))
+        if action == play_next_action:
+            self.track_play_next.emit(track)
+        elif action == enqueue_action:
+            self.track_enqueue.emit(track)
+        elif action == remove_action:
+            self.track_remove.emit(track.video_id)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 #  MAIN WINDOW — Frameless, translucent, always-on-top widget
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -747,7 +866,8 @@ class MainWindow(QWidget):
 
     def __init__(self, search_service: SearchService, stream_resolver: StreamResolver,
                  audio_engine: AudioEngine, queue_manager: QueueManager,
-                 settings: Settings, parent=None):
+                 settings: Settings, local_library: LocalLibrary,
+                 download_manager: DownloadManager, parent=None):
         super().__init__(parent)
 
         self._search = search_service
@@ -755,7 +875,9 @@ class MainWindow(QWidget):
         self._engine = audio_engine
         self._queue_mgr = queue_manager
         self._settings = settings
-        self._expanded_panel: Optional[str] = None  # "search" or "queue" or None
+        self._local_library = local_library
+        self._download_manager = download_manager
+        self._expanded_panel: Optional[str] = None  # "search" or "queue" or "downloads" or None
 
         # ── Window setup ───────────────────────────────────────────────────
         self.setWindowFlags(
@@ -782,18 +904,21 @@ class MainWindow(QWidget):
         self.title_bar.minimize_clicked.connect(self.hide)
         self.title_bar.btn_search.clicked.connect(lambda: self._toggle_panel("search"))
         self.title_bar.btn_queue.clicked.connect(lambda: self._toggle_panel("queue"))
+        self.title_bar.btn_downloads.clicked.connect(lambda: self._toggle_panel("downloads"))
         self._layout.addWidget(self.title_bar)
 
         # Search panel (collapsible)
         self.search_panel = SearchPanel(search_service, self)
-        self.search_panel.track_selected.connect(self._on_track_selected)
+        self.search_panel.track_selected.connect(self._on_search_track_selected)
         self.search_panel.track_play_next.connect(queue_manager.play_next)
         self.search_panel.track_enqueue.connect(queue_manager.enqueue)
+        self.search_panel.track_download_requested.connect(download_manager.download)
         self._layout.addWidget(self.search_panel)
 
         # Now playing
         self.now_playing = NowPlaying(self)
         self.now_playing.seek_requested.connect(audio_engine.seek)
+        self.now_playing.download_requested.connect(download_manager.download)
         self._layout.addWidget(self.now_playing)
 
         # Controls
@@ -810,7 +935,16 @@ class MainWindow(QWidget):
         self.queue_panel = QueuePanel(self)
         self.queue_panel.track_removed.connect(queue_manager.remove_from_queue)
         self.queue_panel.track_clicked.connect(self._on_queue_track_clicked)
+        self.queue_panel.track_download_requested.connect(download_manager.download)
         self._layout.addWidget(self.queue_panel)
+
+        # Downloads panel (collapsible)
+        self.downloads_panel = DownloadsPanel(local_library, self)
+        self.downloads_panel.track_clicked.connect(self._on_download_track_selected)
+        self.downloads_panel.track_play_next.connect(queue_manager.play_next)
+        self.downloads_panel.track_enqueue.connect(queue_manager.enqueue)
+        self.downloads_panel.track_remove.connect(local_library.remove_track)
+        self._layout.addWidget(self.downloads_panel)
 
         # ── Wire engine signals ────────────────────────────────────────────
         audio_engine.state_changed.connect(self._on_state_changed)
@@ -870,12 +1004,14 @@ class MainWindow(QWidget):
             # Collapse
             self.search_panel.setVisible(False)
             self.queue_panel.setVisible(False)
+            self.downloads_panel.setVisible(False)
             self._expanded_panel = None
             self.setFixedHeight(MINI_HEIGHT)
         else:
             # Expand the requested panel
             self.search_panel.setVisible(panel_name == "search")
             self.queue_panel.setVisible(panel_name == "queue")
+            self.downloads_panel.setVisible(panel_name == "downloads")
             self._expanded_panel = panel_name
             self.setFixedHeight(EXPANDED_HEIGHT)
             if panel_name == "search":
@@ -889,11 +1025,23 @@ class MainWindow(QWidget):
     def _on_play_pause_clicked(self):
         self._queue_mgr.toggle_playback()
 
-    def _on_track_selected(self, track: Track):
+    def _on_search_track_selected(self, track: Track):
         self._queue_mgr.play_track_and_queue(track)
         # Collapse search after selection
         if self._expanded_panel == "search":
             self._toggle_panel("search")
+            
+    def _on_download_track_selected(self, track: Track):
+        # Create a playlist from the remaining local tracks
+        try:
+            idx = self._local_library.tracks.index(track)
+            related = self._local_library.tracks[idx+1:]
+        except ValueError:
+            related = []
+        self._queue_mgr.play_track_and_queue(track, related)
+        # Collapse panel after selection
+        if self._expanded_panel == "downloads":
+            self._toggle_panel("downloads")
 
     def _on_state_changed(self, state: str):
         self.controls.set_playing(state in ("playing", "loading"))

@@ -314,7 +314,6 @@ class AudioEngine(QObject):
         super().__init__(parent)
         self._player = None
         self._state = "stopped"
-        self._stopping = False
         self._position = 0.0
         self._duration = 0.0
         self._volume = 70
@@ -338,12 +337,12 @@ class AudioEngine(QObject):
 
             @self._player.event_callback("end-file")
             def _on_end(event):
-                if self._stopping:
-                    return
-                # Only fire track_finished on natural EOF, not manual stop
-                reason = str(event).lower()
-                if "eof" in reason:
-                    QTimer.singleShot(0, self.track_finished.emit)
+                try:
+                    reason = event.as_dict().get('reason')
+                    if reason == b'eof':
+                        QTimer.singleShot(0, self.track_finished.emit)
+                except Exception:
+                    pass
 
             @self._player.event_callback("file-loaded")
             def _on_file_loaded(event):
@@ -362,7 +361,6 @@ class AudioEngine(QObject):
             if not self._player:
                 return
         try:
-            self._stopping = False
             self._state = "loading"
             self.state_changed.emit("loading")
             self._player.play(url)
@@ -405,7 +403,6 @@ class AudioEngine(QObject):
 
     def stop(self):
         """Stop playback completely."""
-        self._stopping = True
         if self._player:
             try:
                 self._player.stop()
@@ -544,9 +541,7 @@ class QueueManager(QObject):
             self._history.append(self._current)
         self._current = track
         self.current_changed.emit(track)
-        self._engine.stop()
-        self._engine.set_loading()
-        self._resolver.resolve(track.video_id)
+        self._play_track(track)
 
     def load_track(self, track: Track):
         """Load a track as current without playing it immediately."""
@@ -556,9 +551,7 @@ class QueueManager(QObject):
     def play_current(self):
         """Play the currently loaded track (used for resuming state)."""
         if self._current:
-            self._engine.stop()
-            self._engine.set_loading()
-            self._resolver.resolve(self._current.video_id)
+            self._play_track(self._current)
 
     def toggle_playback(self):
         """Toggle play/pause, or play the loaded track if stopped."""
@@ -574,8 +567,9 @@ class QueueManager(QObject):
         if related:
             self._queue.extend(related)
         else:
-            # Fetch radio/related tracks
-            self._search.get_watch_playlist(track.video_id)
+            # Fetch radio/related tracks if not local
+            if not track.is_local:
+                self._search.get_watch_playlist(track.video_id)
         self.queue_changed.emit()
 
     def enqueue(self, track: Track):
@@ -591,9 +585,7 @@ class QueueManager(QObject):
     def next(self):
         """Skip to the next track."""
         if self._repeat == RepeatMode.ONE and self._current:
-            self._engine.stop()
-            self._engine.set_loading()
-            self._resolver.resolve(self._current.video_id)
+            self._play_track(self._current)
             return
 
         if self._queue:
@@ -602,12 +594,10 @@ class QueueManager(QObject):
             track = self._queue.popleft()
             self._current = track
             self.current_changed.emit(track)
-            self._engine.stop()
-            self._engine.set_loading()
-            self._resolver.resolve(track.video_id)
+            self._play_track(track)
             self.queue_changed.emit()
             # Pre-resolve the next one
-            if self._queue:
+            if self._queue and not self._queue[0].is_local:
                 self._resolver.resolve(self._queue[0].video_id)
         elif self._repeat == RepeatMode.ALL and self._history:
             # Restart from history
@@ -627,9 +617,7 @@ class QueueManager(QObject):
                 self._queue.appendleft(self._current)
             self._current = self._history.pop()
             self.current_changed.emit(self._current)
-            self._engine.stop()
-            self._engine.set_loading()
-            self._resolver.resolve(self._current.video_id)
+            self._play_track(self._current)
             self.queue_changed.emit()
 
     def clear(self):
@@ -689,6 +677,17 @@ class QueueManager(QObject):
         self._engine.stop()
 
     # ── Private ────────────────────────────────────────────────────────────
+    def _play_track(self, track: Track):
+        """Play a track immediately, handling local files vs internet streams."""
+        self._engine.stop()
+        self._engine.set_loading()
+        self._user_stopped = False
+        if track.is_local and track.local_path:
+            # Play local file directly
+            self._engine.play(track.local_path)
+        else:
+            self._resolver.resolve(track.video_id)
+
     def _shuffle_queue(self):
         q_list = list(self._queue)
         random.shuffle(q_list)
@@ -706,11 +705,10 @@ class QueueManager(QObject):
             self._engine.play(stream_url)
 
     def _on_resolve_error(self, video_id: str, error_msg: str):
-        """Handle stream resolution failure — skip to next."""
+        """Handle stream resolution failure."""
         if self._current and self._current.video_id == video_id:
             self._engine.error.emit(f"Cannot play: {error_msg}")
-            # Auto-skip after a brief delay
-            QTimer.singleShot(1000, self.next)
+            self._engine.stop()
 
     def _on_watch_playlist(self, tracks: list[Track]):
         """Received related tracks from search service."""

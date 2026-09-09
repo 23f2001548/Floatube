@@ -24,6 +24,7 @@ from PyQt6.QtNetwork import QLocalServer, QLocalSocket
 from models import Track
 from styles import STYLESHEET
 from services import SearchService, StreamResolver, AudioEngine, QueueManager
+from library import LocalLibrary, DownloadManager
 from platform_utils import Settings, MediaKeyListener, Positioning, get_asset_path
 from ui import MainWindow, TrayIcon
 
@@ -73,14 +74,18 @@ def main():
     search_service = SearchService()
     stream_resolver = StreamResolver()
     queue_manager = QueueManager(search_service, stream_resolver, audio_engine)
+    
+    local_library = LocalLibrary()
+    download_manager = DownloadManager(local_library)
 
-    # ── Instantiate UI ─────────────────────────────────────────────────────
     window = MainWindow(
         search_service=search_service,
         stream_resolver=stream_resolver,
         audio_engine=audio_engine,
         queue_manager=queue_manager,
         settings=settings,
+        local_library=local_library,
+        download_manager=download_manager,
     )
 
     tray = TrayIcon()
@@ -112,9 +117,21 @@ def main():
             queue_manager.load_track(last_track)
         except Exception:
             pass
+    def is_online():
+        import socket
+        try:
+            socket.setdefaulttimeout(1)
+            socket.socket(socket.AF_INET, socket.SOCK_STREAM).connect(("8.8.8.8", 53))
+            return True
+        except OSError:
+            return False
 
     # ── Show window ────────────────────────────────────────────────────────
     window.close_requested.connect(lambda: _shutdown(app, audio_engine, media_keys, settings, window))
+    
+    if not is_online():
+        window._toggle_panel("downloads")
+        
     window.show()
 
     def on_new_connection():

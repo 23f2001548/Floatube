@@ -19,6 +19,8 @@ class Track:
     thumbnail_url: str = ""
     stream_url: Optional[str] = None
     stream_expiry: Optional[datetime] = None
+    is_local: bool = False
+    local_path: Optional[str] = None
 
     @property
     def duration_display(self) -> str:
@@ -47,6 +49,8 @@ class Track:
             "album": self.album,
             "duration_seconds": self.duration_seconds,
             "thumbnail_url": self.thumbnail_url,
+            "is_local": self.is_local,
+            "local_path": self.local_path,
         }
 
     @classmethod
@@ -59,4 +63,6 @@ class Track:
             album=data.get("album", ""),
             duration_seconds=data.get("duration_seconds", 0),
             thumbnail_url=data.get("thumbnail_url", ""),
+            is_local=data.get("is_local", False),
+            local_path=data.get("local_path", None)
         )
